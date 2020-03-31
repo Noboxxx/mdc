@@ -25,6 +25,20 @@ def split_path(path):
     return path.split('/')
 
 
+def copy(path, destination):
+    path_name = split_path(path)[-1]
+    new_path = join_path(destination, path_name)
+    if os.path.isfile(path):
+        with open(path, 'r') as f:
+            content = f.read()
+        with open(new_path, 'w') as f:
+            f.write(content)
+    elif os.path.isdir(path):
+        os.mkdir(new_path)
+        for directory in listdir(path, full=True):
+            copy(directory, new_path)
+
+
 class Builder(object):
 
     def __init__(self):
@@ -52,8 +66,7 @@ class Builder(object):
         info('Build ends', prefix=self.__class__.__name__, suffix='Took {0} sec.'.format(time.time() - start_build), new_line_after=True)
 
 
-class MetaPath(object):
-
+class Path(object):
     def __init__(self, path):
         if not self.is_one(path):
             error('The given argument(s) is(are) not valid. Got -> {0}'.format(path), prefix=self.__class__.__name__)
@@ -67,66 +80,131 @@ class MetaPath(object):
 
     @classmethod
     def is_one(cls, path):
-        return False
-
-    def get_path(self):
-        return self.path
-
-    def delete(self):
-        os.remove(self.path)
-
-
-class Data(MetaPath):
-    current_folder = 'current'
-    old_folder = 'old'
-
-    @classmethod
-    def is_one(cls, path):
-        if os.path.exists(path):
-            if os.path.isdir(path):
-                children = listdir(path)
-                if cls.current_folder in children:
-                    if cls.old_folder in children:
-                        return True
-        return False
-
-    @classmethod
-    def create(cls, path):
-        if cls.exists(path) is True:
-            return cls(path)
-        os.mkdir(path)
-        os.mkdir(join_path(path, cls.current_folder))
-        os.mkdir(join_path(path, cls.old_folder))
-
-        data = cls(path)
-        DataVersion.create(data)
-        return data
-
-    @classmethod
-    def exists(cls, path):
         return os.path.exists(path)
 
     def get_path(self):
         return self.path
 
-    def get_old_path(self):
-        return join_path(self.path, self.old_folder)
 
-    def get_current_path(self):
-        return join_path(self.path, self.current_folder)
+class Folder(Path):
 
-    def get_last_data_version(self):
+    @classmethod
+    def is_one(cls, path):
+        if os.path.exists(path):
+            if os.path.isdir(path):
+                return True
+        return False
+
+    @classmethod
+    def create(cls, path):
+        if cls.is_one(path) is True:
+            error('Already exists')
+
+        os.mkdir(path)
+        return cls(path)
+
+    def get_children(self):
+        children = list()
+        for path in listdir(self.path, full=True):
+            if self.is_one(path):
+                children.append(self.__class__(path))
+            elif File.is_one(path):
+                children.append(File(path))
+        return children
+
+
+class File(Path):
+    @classmethod
+    def is_one(cls, path):
+        if os.path.exists(path):
+            if os.path.isfile(path):
+                return True
+        return False
+
+    @classmethod
+    def create(cls, path):
+        if cls.is_one(path) is True:
+            error('Already exists')
+
+        with open(path, 'w') as f:
+            f.write('')
+
+        return cls(path)
+
+    def write(self, content):
+        with open(self.path, 'w') as f:
+            f.write(content)
+
+    def read(self):
+        with open(self.path, 'r') as f:
+            return f.read()
+
+
+class Workspace(Folder):
+
+    @classmethod
+    def get_current(cls):
+        return cls(cmds.workspace(rootDirectory=True)[:-1])
+
+    @classmethod
+    def is_one(cls, path):
+        return True
+
+    def get_data(self):
+        data = list()
+        for path in listdir(self.path, full=True):
+            if self.is_one(path):
+                data.append(Data(path))
+        return data
+
+    def get_name(self):
+        return split_path(self.path)[-1]
+
+
+class Data(Folder):
+
+    @classmethod
+    def is_one(cls, path):
+        if os.path.exists(path):
+            if os.path.isdir(path):
+                return True
+        return False
+
+    @classmethod
+    def create(cls, path):
+        if cls.is_one(path) is True:
+            error('The data folder already exists therefore it cannot be created -> {0}'.format(path))
+        os.mkdir(path)
+        return cls(path)
+
+    def get_last_version(self):
         last_data_version = -1
-        for data_version in self.get_data_versions():
-            last_data_index = last_data_version.get_index() if isinstance(last_data_version, DataVersion) else -1
+        for data_version in self.get_versions():
+            last_data_index = last_data_version.get_index() if isinstance(last_data_version, Version) else -1
             if data_version.get_index() > last_data_index:
                 last_data_version = data_version
-        if isinstance(last_data_version, DataVersion):
+        if isinstance(last_data_version, Version):
             return last_data_version
         return None
 
-    def get_data_versions(self):
-        return DataVersion.get_all(self)
+    def get_files(self):
+        directories = list()
+        for directory in listdir(self.path):
+            path = join_path(self.path, directory)
+            if directory != Version.__class__.__name__.lower():
+                if directory != VersionInfo.name:
+                    directories.append(path)
+        return directories
+
+    def create_version(self):
+        return Version.create(self)
+
+    def empty_folder(self):
+        for path in self.get_files():
+            os.remove(path)
+
+    def get_versions(self):
+        return Version.get_all(self)
 
     def import_(self):
         error('Import not implemented for this data.', prefix=self.__class__.__name__)
@@ -138,11 +216,11 @@ class Data(MetaPath):
         return split_path(self.path)[-1]
 
 
-class DataVersion(MetaPath):
+class Version(Folder):
 
     @classmethod
     def create(cls, data):
-        last_version = data.get_last_data_version()
+        last_version = data.get_last_version()
         index = 0
         if last_version is not None:
             index = last_version.get_index() + 1
@@ -151,7 +229,11 @@ class DataVersion(MetaPath):
         os.mkdir(version_path)
 
         version = cls(version_path)
-        InfoFile.create(version_path)
+
+        for path in data.get_files():
+            copy(path, version.get_path())
+
+        VersionInfo.create(version_path)
         return version
 
     @classmethod
@@ -168,8 +250,8 @@ class DataVersion(MetaPath):
         for directory in listdir(data.get_path()):
             if directory.isdigit():
                 path = join_path(data.get_path(), directory)
-                if DataVersion.is_one(path):
-                    data_versions.append(DataVersion(path))
+                if Version.is_one(path):
+                    data_versions.append(Version(path))
         return data_versions
 
     def get_index(self):
@@ -187,11 +269,8 @@ class DataVersion(MetaPath):
         return paths
 
 
-class InfoFile(MetaPath):
+class VersionInfo(File):
     name = 'info.json'
-
-    def get_type(self):
-        return self.get_dict()['type']
 
     def get_dict(self):
         with open(self.path) as f:
@@ -205,8 +284,8 @@ class InfoFile(MetaPath):
         return self.get_dict()['creation_date']
 
     @classmethod
-    def create(cls, directory, type_):
-        content = {'type': type_, 'user': getpass.getuser(), 'creation_date': time.time()}
+    def create(cls, directory):
+        content = {'user': getpass.getuser(), 'creation_date': time.time()}
         info_path = join_path(directory, cls.name)
         if not os.path.exists(info_path):
             with open(info_path, 'w') as f:
@@ -220,4 +299,3 @@ class InfoFile(MetaPath):
                 if split_path(path)[-1] == cls.name:
                     return True
         return False
-
