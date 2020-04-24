@@ -1,13 +1,10 @@
-from PySide2 import QtWidgets, QtCore
-import datetime
+from PySide2 import QtWidgets
 from shiboken2 import wrapInstance
 import maya.OpenMayaUI as omui
 import re
 import os
 from maya import cmds, mel
-import json
 import time
-import getpass
 import sys
 import workspace_loader
 import webbrowser
@@ -422,13 +419,15 @@ def setup_new_scene():
 class Workspace(workspace_loader.Workspace):
 
     def build(self):
-        info('Build {0}'.format(self.get_path()))
+        builder = Builder.from_workspace(self)
+        if builder is None:
+            warning('Builder not found.', prefix=self.__class__.__name__)
+            return False
+        builder.exec_()
+        return True
 
-    def get_sub_folder_path(self, sub_folder):
-        path = '{0}/data'.format(self.get_path(), sub_folder)
-        if os.path.exists(path) is False:
-            os.mkdir(path)
-        return path
+    def get_data(self):
+        return DataFolder.from_workspace(self).get_data()
 
     def get_data_folder(self):
         return DataFolder.from_workspace(self)
@@ -452,6 +451,13 @@ class Data(workspace_loader.Path):
     subclasses = list()
 
     @classmethod
+    def get_subclasses_dict(cls):
+        dictionary = dict()
+        for subclass in cls.__subclasses__():
+            dictionary[subclass.get_underscored_class_name()] = subclass
+        return dictionary
+
+    @classmethod
     def is_one(cls, path):
         if os.path.isdir(path):
             if split_path(path)[-1] == cls.get_underscored_class_name():
@@ -469,18 +475,21 @@ class Data(workspace_loader.Path):
     @classmethod
     def get_all_from_data_folder(cls, data_folder):
         data = list()
-        sub_classes = {class_.get_underscored_class_name(): class_ for class_ in cls.subclasses}
         for item in listdir(data_folder.get_path()):
             full_path = join_path(data_folder.get_path(), item)
             data_class = cls
 
-            for name, class_ in sub_classes.items():
+            for name, class_ in cls.get_subclasses_dict().items():
                 if item == name:
                     data_class = class_
 
-            command = 'if {0}.is_one(\'{1}\'): data.append({0}(\'{1}\'))'.format(data_class.__name__, full_path)
-            exec command
+            if data_class.is_one(full_path):
+                data.append(data_class(full_path))
         return data
+
+    @classmethod
+    def get_all_from_workspace(cls, workspace):
+        return cls.get_all_from_data_folder(workspace.get_data_folder())
 
     @classmethod
     def get_underscored_class_name(cls):
@@ -493,10 +502,14 @@ class Data(workspace_loader.Path):
 
         if workspace is None:
             warning('Unable to find the current workspace. Skip...', prefix=cls.__name__)
-            return
+            return None
 
-        path = join_path(workspace.get_data_path(), cls.get_underscored_class_name())
-        if os.path.exists(path):
+        return cls.from_workspace(workspace)
+
+    @classmethod
+    def from_workspace(cls, workspace):
+        path = join_path(workspace.get_data_folder().get_path(), cls.get_underscored_class_name())
+        if cls.is_one(path):
             return cls(path)
 
         return None
